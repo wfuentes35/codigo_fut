@@ -25,10 +25,10 @@ if not API_KEY or not SECRET_KEY:
     raise ValueError("ERROR: Las claves API_KEY o SECRET_KEY no se encontraron en el archivo .env.")
 client = Client(API_KEY, SECRET_KEY)
 
-# Variables globales para el estado de los Pivotes
-PIVOT_DATA = None
-LAST_PIVOT_DATE = None
-PIVOT_SYMBOL = "BTCUSDT" # Símbolo de referencia para el cálculo de Pivotes
+# Nombres de archivos
+SYMBOLS_FILE = 'top_100_symbols.json'
+PIVOTS_FILE = 'daily_pivots.json'
+
 INTERVALO_MONITOREO_SEG = 900 # 15 minutos
 
 # ==============================================================================
@@ -40,7 +40,6 @@ def calcular_pivotes_fibonacci(high, low, close):
     rango = high - low
     PP = (high + low + close) / 3 
     
-    # Multiplicadores de Fibonacci
     FIB_382, FIB_618, FIB_100 = 0.382, 0.618, 1.000
     
     R1 = PP + (rango * FIB_382)
@@ -50,7 +49,8 @@ def calcular_pivotes_fibonacci(high, low, close):
     S2 = PP - (rango * FIB_618)
     S3 = PP - (rango * FIB_100)
     
-    return {'PP': PP, 'R1': R1, 'R2': R2, 'R3': R3, 'S1': S1, 'S2': S2, 'S3': S3}
+    # Redondeamos a 4 decimales para consistencia
+    return {k: round(v, 4) for k, v in {'PP': PP, 'R1': R1, 'R2': R2, 'R3': R3, 'S1': S1, 'S2': S2, 'S3': S3}.items()}
 
 def enviar_telegram(mensaje):
     """Envía un mensaje a través de la API de Telegram."""
@@ -69,73 +69,111 @@ def enviar_telegram(mensaje):
     except Exception as e:
         print(f"❌ Error al enviar mensaje a Telegram: {e}")
 
-def get_pivots_if_needed():
-    """Calcula o actualiza los Pivotes solo si la fecha UTC ha cambiado."""
-    global PIVOT_DATA, LAST_PIVOT_DATE
-    
-    # La fecha UTC determina el nuevo día de trading de Binance
-    today_utc = datetime.now(timezone.utc).date()
+# ==============================================================================
+# 3. 💾 FUNCIÓN DE ACTUALIZACIÓN DIARIA (SOLO UNA VEZ AL DÍA)
+# ==============================================================================
 
-    # Si es la primera vez (None) o si la fecha ha cambiado, recalcular
-    if PIVOT_DATA is None or LAST_PIVOT_DATE != today_utc:
+def actualizar_pivotes_diarios():
+    """
+    Calcula los Pivotes del día anterior para todos los 100 pares y los guarda 
+    en un JSON. Solo se ejecuta si la fecha guardada es de AYER.
+    """
+    try:
+        with open(SYMBOLS_FILE, 'r') as f:
+            symbols = json.load(f)
+    except FileNotFoundError:
+        print(f"❌ Error: Archivo {SYMBOLS_FILE} no encontrado. Ejecuta el escaneo inicial.")
+        return False
+
+    all_pivots = {}
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    print(f"\n--- ⏳ INICIANDO CÁLCULO DIARIO DE PIVOTES ({today_utc}) ---")
+    
+    # Este proceso puede tardar un poco (100+ llamadas API)
+    for i, symbol in enumerate(symbols):
         try:
-            # Obtenemos la vela cerrada del día anterior
-            klines_daily = client.futures_historical_klines(PIVOT_SYMBOL, Client.KLINE_INTERVAL_1DAY, "2 day ago", limit=2)
+            # Obtener datos de la vela cerrada del día anterior
+            klines_daily = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_1DAY, "2 day ago", limit=2)
             
             if len(klines_daily) < 2:
-                print("❌ No hay datos diarios para calcular Pivotes.")
-                return False
+                print(f"   ⚠️ Datos diarios insuficientes para {symbol}. Omitiendo.")
+                continue
 
-            # Usamos la vela cerrada (índice -2)
             high_d, low_d, close_d = [float(klines_daily[-2][i]) for i in [2, 3, 4]]
             
-            # Recalcular y actualizar globales
-            PIVOT_DATA = calcular_pivotes_fibonacci(high_d, low_d, close_d)
-            LAST_PIVOT_DATE = today_utc
+            pivotes = calcular_pivotes_fibonacci(high_d, low_d, close_d)
             
-            print(f"✅ PIVOTES ACTUALIZADOS para el día: {today_utc}. PP: {PIVOT_DATA['PP']:.2f}")
-            enviar_telegram(f"⭐️ **ACTUALIZACIÓN DIARIA DE PIVOTES** ⭐️\nPP del día: {PIVOT_DATA['PP']:.2f}\nR1: {PIVOT_DATA['R1']:.2f} | S1: {PIVOT_DATA['S1']:.2f}")
-            return True
-        
+            all_pivots[symbol] = {
+                'date': today_utc,
+                'levels': pivotes
+            }
+            if i % 20 == 0:
+                print(f"   Calculando... {symbol}")
+                
         except Exception as e:
-            print(f"❌ Error al calcular/actualizar Pivotes: {e}")
-            return False
+            print(f"   ❌ Error al calcular Pivotes para {symbol}: {e}")
             
-    return True # Los Pivotes ya están actualizados para hoy
+    # Guardar todos los Pivotes calculados
+    with open(PIVOTS_FILE, 'w') as f:
+        json.dump(all_pivots, f)
+        
+    print(f"--- ✅ {len(all_pivots)} Pivotes guardados en {PIVOTS_FILE} ---")
+    enviar_telegram(f"⭐️ **PIVOTES ACTUALIZADOS** ⭐️\nSe calcularon los nuevos Pivotes para {len(all_pivots)} pares para el día {today_utc}.")
+    return True
+
+def verificar_y_actualizar_pivotes():
+    """Verifica si los Pivotes ya fueron calculados para el día de hoy."""
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    try:
+        with open(PIVOTS_FILE, 'r') as f:
+            daily_data = json.load(f)
+        
+        # Tomar cualquier par para verificar la fecha
+        if daily_data and any(data.get('date') == today_utc for data in daily_data.values()):
+            return True # Ya están actualizados
+        else:
+            return actualizar_pivotes_diarios() # No están actualizados, calcular ahora
+
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Si el archivo no existe o está corrupto, actualizar
+        return actualizar_pivotes_diarios()
 
 # ==============================================================================
-# 3. 🚦 LÓGICA DE MONITOREO Y SEÑALES
+# 4. 🚦 LÓGICA DE MONITOREO (USANDO DATOS DEL JSON)
 # ==============================================================================
 
 def buscar_cruces_y_alertar():
-    """Busca cruces EMA en las zonas de Pivotes y envía alertas."""
-    global PIVOT_DATA
+    """Busca cruces EMA en las zonas de Pivotes, LEYENDO el JSON."""
     
-    if not get_pivots_if_needed():
-        print("🛑 No se pudieron obtener/actualizar los Pivotes. Saltando el ciclo de monitoreo.")
+    # 1. VERIFICAR SI HAY QUE CALCULAR LOS PIVOTES
+    if not verificar_y_actualizar_pivotes():
+        print("🛑 Error: No se pudo obtener la data de Pivotes para hoy. Intentando en el próximo ciclo.")
         return
 
+    # 2. CARGAR TODOS LOS PIVOTES DEL JSON
     try:
-        with open('top_100_symbols.json', 'r') as f:
-            symbols = json.load(f)
-    except FileNotFoundError:
-        print("❌ Archivo 'top_100_symbols.json' no encontrado. Ejecuta el escaneo inicial.")
+        with open(PIVOTS_FILE, 'r') as f:
+            all_pivots = json.load(f)
+    except Exception as e:
+        print(f"❌ Error al leer {PIVOTS_FILE}: {e}")
         return
         
-    # Desempaquetar los Pivotes
-    R1, R2, S1, PP = PIVOT_DATA['R1'], PIVOT_DATA['R2'], PIVOT_DATA['S1'], PIVOT_DATA['PP']
-
-    # Monitoreo
-    for symbol in symbols:
+    # 3. MONITOREO CADA 15 MINUTOS
+    for symbol, pivot_data in all_pivots.items():
         try:
-            # Obtener datos de 15m (al menos 51 velas para EMA 50)
+            # Desempaquetar los Pivotes
+            pivotes = pivot_data['levels']
+            R1, R2, S1, PP = pivotes['R1'], pivotes['R2'], pivotes['S1'], pivotes['PP']
+
+            # Obtener datos de 15m y calcular EMAs
             klines_15m = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_15MINUTE, "15 hour ago", limit=65)
             if len(klines_15m) < 51: continue
 
             df = pd.DataFrame(klines_15m, columns=['open_time', 'Open', 'High', 'Low', 'Close', 'Volume', 'close_time', 'Quote asset volume', 'Number of trades', 'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'])
             df['Close'] = df['Close'].astype(float)
 
-            # Calcular EMAs
             df['EMA24'] = df['Close'].ewm(span=24, adjust=False).mean()
             df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
 
@@ -146,37 +184,35 @@ def buscar_cruces_y_alertar():
             ema50_last_closed = df['EMA50'].iloc[-1]
             price_last_closed = df['Close'].iloc[-1]
             
-            # Condición de cruce: el cruce debe ocurrir en la última vela cerrada
             cruce_alcista = (ema24_ant < ema50_ant) and (ema24_last_closed > ema50_last_closed)
             cruce_bajista = (ema24_ant > ema50_ant) and (ema24_last_closed < ema50_last_closed)
             
             
             # --- ZONA DE COMPRA: S1 < Precio < R1 ---
             if cruce_alcista and (price_last_closed > S1 and price_last_closed < R1):
-                zona = f"S1 ({S1:.2f}) / R1 ({R1:.2f})"
-                mensaje = f"🚀 *SEÑAL DE COMPRA EN {symbol} (15M)*\n"
-                mensaje += f"Cruce EMA24/50 ALCISTA detectado.\n"
-                mensaje += f"Precio: {price_last_closed:.2f}\n"
+                zona = f"S1 ({S1:.4f}) / R1 ({R1:.4f})"
+                mensaje = f"🚀 *COMPRA {symbol} (15M)*\n"
+                mensaje += f"Cruce EMA24/50 ALCISTA.\n"
+                mensaje += f"Precio: {price_last_closed:.4f} | PP: {PP:.4f}\n"
                 mensaje += f"Zona: {zona}"
                 enviar_telegram(mensaje)
-                print(f"✅ COMPRA detectada: {symbol} en {zona}")
+                print(f"✅ COMPRA detectada: {symbol}")
                 
             # --- ZONA DE VENTA: P < Precio < R2 ---
             elif cruce_bajista and (price_last_closed > PP and price_last_closed < R2):
-                zona = f"PP ({PP:.2f}) / R2 ({R2:.2f})"
-                mensaje = f"🔻 *SEÑAL DE VENTA EN {symbol} (15M)*\n"
-                mensaje += f"Cruce EMA24/50 BAJISTA detectado.\n"
-                mensaje += f"Precio: {price_last_closed:.2f}\n"
+                zona = f"PP ({PP:.4f}) / R2 ({R2:.4f})"
+                mensaje = f"🔻 *VENTA {symbol} (15M)*\n"
+                mensaje += f"Cruce EMA24/50 BAJISTA.\n"
+                mensaje += f"Precio: {price_last_closed:.4f} | PP: {PP:.4f}\n"
                 mensaje += f"Zona: {zona}"
                 enviar_telegram(mensaje)
-                print(f"✅ VENTA detectada: {symbol} en {zona}")
+                print(f"✅ VENTA detectada: {symbol}")
 
         except Exception as e:
-            # Ignoramos pares que fallen la descarga de datos por liquidez o error temporal.
             print(f"❌ Error al procesar {symbol}: {e}")
 
 # ==============================================================================
-# 4. 🔄 BUCLE PRINCIPAL (TMUX)
+# 5. 🔄 BUCLE PRINCIPAL (TMUX)
 # ==============================================================================
 
 def iniciar_monitoreo():
@@ -185,13 +221,13 @@ def iniciar_monitoreo():
     while True:
         tiempo_inicio = time.time()
         
-        # 1. Ejecutar la búsqueda de señales
+        # Ejecutar la búsqueda de señales y el control de actualización de Pivotes
         buscar_cruces_y_alertar()
         
         tiempo_fin = time.time()
         duracion = tiempo_fin - tiempo_inicio
         
-        # 2. Esperar exactamente hasta que se cumplan los 15 minutos
+        # Esperar exactamente hasta que se cumplan los 15 minutos
         tiempo_espera = INTERVALO_MONITOREO_SEG - duracion
         
         print(f"Ciclo completado en {duracion:.2f} segundos.")
