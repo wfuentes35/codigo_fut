@@ -6,7 +6,7 @@ API_KEY = "TU_API_KEY"
 SECRET_KEY = "TU_SECRET_KEY"
 client = Client(API_KEY, SECRET_KEY)
 
-def obtener_top_symbols(limit=100):
+def obtener_top_symbols(limit=200):
     """Obtiene los 'limit' mejores pares de USDT por volumen en Binance Futures."""
     try:
         # Obtener información de todos los tickers de FUTUROS
@@ -41,4 +41,5 @@ def obtener_top_symbols(limit=100):
 
 # Ejecutar el escaneo inicial
 if __name__ == '__main__':
-    obtener_top_symbols(limit=100)
+
+    obtener_top_symbols(limit=200)
