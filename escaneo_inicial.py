@@ -1,27 +1,35 @@
 import json
 from binance.client import Client
+from dotenv import load_dotenv
+import os
 
-# ⚠️ CONFIGURACIÓN DE LA API
-API_KEY = "TU_API_KEY"
-SECRET_KEY = "TU_SECRET_KEY"
+# Cargar variables de entorno del archivo .env
+# Este comando debe estar al inicio para que las claves estén disponibles.
+load_dotenv()
+
+# ==============================================================================
+# ⚠️ CONFIGURACIÓN DE LA API (Obtenida del .env)
+# ==============================================================================
+# Se usa os.getenv() para buscar las variables dentro del entorno cargado.
+API_KEY = os.getenv("API_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
+
+# Verifica si las claves existen antes de inicializar el cliente
+if not API_KEY or not SECRET_KEY:
+    raise ValueError("ERROR: API_KEY o SECRET_KEY no se encontraron en el archivo .env. Asegúrate de que el archivo existe y las variables están definidas.")
+
 client = Client(API_KEY, SECRET_KEY)
 
 def obtener_top_symbols(limit=200):
-    """Obtiene los 'limit' mejores pares de USDT por volumen en Binance Futures."""
+    """Obtiene los 'limit' mejores pares de USDT de Binance Futures."""
     try:
-        # Obtener información de todos los tickers de FUTUROS
+        # Usamos la función de futuros ya que tu monitoreo es en Futures.
         tickers = client.futures_ticker()
         
         # Filtra solo pares contra USDT y excluye índices
         usdt_pairs = [t for t in tickers if t['symbol'].endswith('USDT') and not t['symbol'].endswith('_USDT')]
 
-        # Ordenar por volumen de trading (generalmente 'quoteVolume' o 'volume' de 24h)
-        # Aquí usamos 'quoteVolume' (volumen en USDT), que es un buen proxy.
-        # NOTA: La API de 'futures_ticker' no tiene un campo de volumen directo para ordenar fácilmente,
-        # por lo que usaremos los primeros 100 pares devueltos por la API para simplificar la obtención.
-        # Para un escaneo más preciso (por volumen real), se requeriría más lógica de solicitud de estadísticas.
-        
-        # Tomaremos los primeros 'limit' pares de la lista inicial
+        # Tomamos los primeros 'limit' pares
         top_symbols = [t['symbol'] for t in usdt_pairs[:limit]]
 
         if not top_symbols:
@@ -36,10 +44,9 @@ def obtener_top_symbols(limit=200):
         return top_symbols
 
     except Exception as e:
-        print(f"❌ Error al obtener/guardar símbolos: {e}")
+        print(f"❌ Error al obtener/guardar símbolos. Verifica la conexión a la API: {e}")
         return []
 
 # Ejecutar el escaneo inicial
 if __name__ == '__main__':
-
     obtener_top_symbols(limit=200)
