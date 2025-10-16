@@ -69,22 +69,29 @@ def load_active_trades():
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
+### CAMBIO: Función `save_active_trades` mejorada.
+# Ahora el conversor maneja correctamente los tipos de datos de NumPy (como bool_, int64, float64)
+# y los convierte a tipos nativos de Python antes de guardarlos en el JSON.
 def save_active_trades(trades):
     """
     Guarda el estado de las operaciones activas. 
-    Usa un conversor para manejar booleanos, previniendo el error de serialización.
+    Usa un conversor para manejar tipos de datos de NumPy, previniendo errores de serialización.
     """
-    def json_converter(obj):
-        """Convierte booleanos a cadenas 'True'/'False' para evitar el error de serialización."""
-        if isinstance(obj, bool):
-            return str(obj)
+    def enhanced_json_converter(obj):
+        """Convierte tipos de NumPy a tipos nativos de Python para que sean serializables."""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
         if isinstance(obj, datetime):
             return obj.isoformat()
         raise TypeError(f'Object of type {obj.__class__.__name__} is not JSON serializable')
 
     try:
         with open(TRADES_FILE, 'w') as f:
-            json.dump(trades, f, indent=4, default=json_converter)
+            json.dump(trades, f, indent=4, default=enhanced_json_converter)
     except Exception as e:
         print(f"❌ Error al guardar {TRADES_FILE}: {e}")
 
@@ -100,7 +107,7 @@ def save_closed_trades(trades_list):
     """Guarda el historial de operaciones cerradas."""
     try:
         with open(CLOSED_TRADES_FILE, 'w') as f:
-            json.dump(trades_list, f, indent=4)
+            json.dump(trades_list, f, indent=4, default=str) # Usamos default=str como fallback para fechas
     except Exception as e:
         print(f"❌ Error al guardar {CLOSED_TRADES_FILE}: {e}")
 
@@ -159,7 +166,7 @@ def actualizar_pivotes_diarios():
     with open(PIVOTS_FILE, 'w') as f:
         json.dump(all_pivots, f, indent=4)
         
-    print(f"--- ✅ {len(all_pivotes)} Pivotes guardados en {PIVOTS_FILE} ---")
+    print(f"--- ✅ {len(all_pivots)} Pivotes guardados en {PIVOTS_FILE} ---")
     enviar_telegram(f"⭐️ **PIVOTES ACTUALIZADOS** ⭐️\nSe calcularon los nuevos Pivotes para {len(all_pivots)} pares para el día {today_utc}.")
     return True
 
@@ -187,6 +194,9 @@ def check_active_trades(all_pivots):
     """Verifica el progreso de las operaciones activas (TP1, TP2, SL)."""
     
     active_trades = load_active_trades()
+    if not active_trades:
+        return
+        
     updated_trades = active_trades.copy()
     closed_trades_list = load_closed_trades()
 
@@ -249,8 +259,9 @@ def check_active_trades(all_pivots):
                 
             # 3. Comprobar TP2 (Cierra operación con Ganancia Máxima)
             if (is_long and price > tp2_level) or (not is_long and price < tp2_level):
-                if trade.get('tp1_hit') != 'True': # Asegura que haya pasado por TP1
-                    updated_trades[symbol]['tp1_hit'] = 'True'
+                ### CAMBIO: Se ajusta la lógica para que funcione con booleanos nativos.
+                if not trade.get('tp1_hit'): # Asegura que haya pasado por TP1
+                    updated_trades[symbol]['tp1_hit'] = True
 
                 mensaje = f"🎯 *TP2 LOGRADO* - {symbol} ({trade['entry_type']}) 🎯\n"
                 mensaje += f"Precio: {price:.4f} | Nivel R2/S2: {tp2_level:.4f}"
@@ -258,7 +269,8 @@ def check_active_trades(all_pivots):
                 
                 # Mover a historial de cerrados
                 trade['status'] = 'CLOSED_TP'
-                trade['tp2_hit'] = 'True'
+                ### CAMBIO: Se usa el booleano nativo `True`
+                trade['tp2_hit'] = True
                 trade['close_price'] = price
                 trade['close_date'] = datetime.now().isoformat()
                 closed_trades_list.append(trade)
@@ -267,11 +279,13 @@ def check_active_trades(all_pivots):
 
             # 4. Comprobar TP1 (Marca Hit para monitorear TP2)
             if (is_long and price > tp1_level) or (not is_long and price < tp1_level):
-                if trade.get('tp1_hit') != 'True':
+                ### CAMBIO: Se ajusta la lógica para que funcione con booleanos nativos.
+                if not trade.get('tp1_hit'):
                     mensaje = f"✅ *TP1 LOGRADO* - {symbol} ({trade['entry_type']}) ✅\n"
                     mensaje += f"Precio: {price:.4f} | Nivel R1/S1: {tp1_level:.4f}"
                     enviar_telegram(mensaje)
-                    updated_trades[symbol]['tp1_hit'] = 'True'
+                    ### CAMBIO: Se usa el booleano nativo `True`
+                    updated_trades[symbol]['tp1_hit'] = True
                     
         except Exception as e:
             print(f"❌ Error al chequear trade activo para {symbol}: {e}")
@@ -291,7 +305,7 @@ def detect_new_signals(all_pivots):
     
     for symbol, pivot_data in all_pivots.items():
         try:
-            # CORRECCIÓN DE DUPLICIDAD: Si el símbolo ya está activo, saltar.
+            # Si el símbolo ya está activo, saltar.
             if symbol in active_trades: 
                 continue 
                 
@@ -310,36 +324,32 @@ def detect_new_signals(all_pivots):
             df['EMA100'] = df['Close'].ewm(span=100, adjust=False).mean()
             df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
 
-            ema24_ant = df['EMA24'].iloc[-2]
-            ema50_ant = df['EMA50'].iloc[-2]
+            ema24_ant, ema50_ant = df['EMA24'].iloc[-2], df['EMA50'].iloc[-2]
             price_last_closed = df['Close'].iloc[-1]
-            ema100_last = df['EMA100'].iloc[-1]
-            ema200_last = df['EMA200'].iloc[-1]
+            ema100_last, ema200_last = df['EMA100'].iloc[-1], df['EMA200'].iloc[-1]
 
             cruce_alcista = (ema24_ant < ema50_ant) and (df['EMA24'].iloc[-1] > df['EMA50'].iloc[-1])
             cruce_bajista = (ema24_ant > ema50_ant) and (df['EMA24'].iloc[-1] < df['EMA50'].iloc[-1])
             
-            # --- ANÁLISIS DE VOLUMEN ---
             vol_cruce = df['Volume'].iloc[-1]
             vol_hora_ant = df['Volume'].iloc[-5:-1].mean()
             vol_change_pct = ((vol_cruce - vol_hora_ant) / vol_hora_ant) * 100 if vol_hora_ant > 0 else 0
             
-            # --- ANÁLISIS DE EMAs LENTAS ---
             ema_context = {
                 'sobre_ema100': price_last_closed > ema100_last,
                 'sobre_ema200': price_last_closed > ema200_last
             }
             
-            
             # --- LONG (COMPRA): S1 < Precio < R1 ---
-            if cruce_alcista and (price_last_closed > S1 and price_last_closed < R1):
+            if cruce_alcista and (S1 < price_last_closed < R1):
                 
                 active_trades[symbol] = {
                     'status': 'OPEN',
                     'entry_type': 'LONG',
                     'entry_price': price_last_closed,
                     'tp1_key': 'R1', 'tp2_key': 'R2', 'sl_key': 'S1',
-                    'tp1_hit': 'False', 'tp2_hit': 'False', # Guardados como strings
+                    ### CAMBIO: Se usan booleanos nativos en lugar de strings.
+                    'tp1_hit': False, 'tp2_hit': False,
                     'vol_pct_change': round(vol_change_pct, 2),
                     'ema_100_context': ema_context['sobre_ema100'],
                     'ema_200_context': ema_context['sobre_ema200'],
@@ -347,7 +357,6 @@ def detect_new_signals(all_pivots):
                 }
                 save_active_trades(active_trades)
 
-                zona = f"S1 ({S1:.4f}) / R1 ({R1:.4f})"
                 mensaje = f"🚀 *NUEVA COMPRA EN {symbol} (15M)*\n"
                 mensaje += f"Cruce EMA24/50 ALCISTA.\n"
                 mensaje += f"Precio Entrada: {price_last_closed:.4f} | PP: {PP:.4f}\n"
@@ -357,14 +366,15 @@ def detect_new_signals(all_pivots):
                 print(f"✅ NUEVA COMPRA detectada: {symbol}")
                 
             # --- SHORT (VENTA): P < Precio < R2 ---
-            elif cruce_bajista and (price_last_closed > PP and price_last_closed < R2):
+            elif cruce_bajista and (PP < price_last_closed < R2):
                 
                 active_trades[symbol] = {
                     'status': 'OPEN',
                     'entry_type': 'SHORT',
                     'entry_price': price_last_closed,
                     'tp1_key': 'PP', 'tp2_key': 'S1', 'sl_key': 'R2',
-                    'tp1_hit': 'False', 'tp2_hit': 'False', # Guardados como strings
+                    ### CAMBIO: Se usan booleanos nativos en lugar de strings.
+                    'tp1_hit': False, 'tp2_hit': False,
                     'vol_pct_change': round(vol_change_pct, 2),
                     'ema_100_context': ema_context['sobre_ema100'],
                     'ema_200_context': ema_context['sobre_ema200'],
@@ -372,7 +382,6 @@ def detect_new_signals(all_pivots):
                 }
                 save_active_trades(active_trades)
 
-                zona = f"PP ({PP:.4f}) / R2 ({R2:.4f})"
                 mensaje = f"🔻 *NUEVA VENTA EN {symbol} (15M)*\n"
                 mensaje += f"Cruce EMA24/50 BAJISTA.\n"
                 mensaje += f"Precio Entrada: {price_last_closed:.4f} | PP: {PP:.4f}\n"
@@ -394,24 +403,19 @@ def iniciar_monitoreo():
     while True:
         tiempo_inicio = time.time()
         
-        # 1. Verificar y actualizar Pivotes (incluye resumen diario de trades cerrados)
         if not verificar_y_actualizar_pivotes():
             print("🛑 Fallo al actualizar Pivotes. Reintentando en el próximo ciclo.")
             
-        # 2. Cargar los Pivotes del día
         try:
             with open(PIVOTS_FILE, 'r') as f:
                 all_pivots = json.load(f)
-        except Exception:
+        except (FileNotFoundError, json.JSONDecodeError):
              all_pivots = {}
 
-        # 3. Verificar si los trades activos ya tocaron TP o SL (gestión de riesgo y documentación de falla)
-        check_active_trades(all_pivots)
-        
-        # 4. Detectar si hay nuevas señales (apertura de trade con análisis de volumen/EMA)
-        detect_new_signals(all_pivots)
+        if all_pivots:
+            check_active_trades(all_pivots)
+            detect_new_signals(all_pivots)
 
-        # 5. Control de tiempo
         tiempo_fin = time.time()
         duracion = tiempo_fin - tiempo_inicio
         tiempo_espera = INTERVALO_MONITOREO_SEG - duracion
