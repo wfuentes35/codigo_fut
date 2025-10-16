@@ -27,7 +27,7 @@ client = Client(API_KEY, SECRET_KEY)
 SYMBOLS_FILE = 'top_100_symbols.json'
 PIVOTS_FILE = 'daily_pivots.json'
 TRADES_FILE = 'active_trades.json'
-CLOSED_TRADES_FILE = 'closed_trades.json' # Nuevo archivo para histórico
+CLOSED_TRADES_FILE = 'closed_trades.json' # Archivo para histórico
 
 INTERVALO_MONITOREO_SEG = 900 # 15 minutos
 
@@ -60,6 +60,7 @@ def enviar_telegram(mensaje):
     except Exception as e: print(f"❌ Error al enviar mensaje a Telegram: {e}")
 
 # Funciones de persistencia de estado de operaciones
+
 def load_active_trades():
     """Carga el estado de las operaciones activas."""
     try:
@@ -69,10 +70,21 @@ def load_active_trades():
         return {}
 
 def save_active_trades(trades):
-    """Guarda el estado de las operaciones activas."""
+    """
+    Guarda el estado de las operaciones activas. 
+    Usa un conversor para manejar booleanos, previniendo el error de serialización.
+    """
+    def json_converter(obj):
+        """Convierte booleanos a cadenas 'True'/'False' para evitar el error de serialización."""
+        if isinstance(obj, bool):
+            return str(obj)
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        raise TypeError(f'Object of type {obj.__class__.__name__} is not JSON serializable')
+
     try:
         with open(TRADES_FILE, 'w') as f:
-            json.dump(trades, f, indent=4)
+            json.dump(trades, f, indent=4, default=json_converter)
     except Exception as e:
         print(f"❌ Error al guardar {TRADES_FILE}: {e}")
 
@@ -118,7 +130,7 @@ def actualizar_pivotes_diarios():
         mensaje_resumen += f"Total de Operaciones Cerradas: {total}"
         enviar_telegram(mensaje_resumen)
         
-        # Opcional: Limpiar el archivo para comenzar el nuevo día limpio (sino se acumula)
+        # Limpiar el archivo para comenzar el nuevo día limpio
         save_closed_trades([]) 
 
     # 2. CÁLCULO DE PIVOTES
@@ -127,7 +139,6 @@ def actualizar_pivotes_diarios():
     print(f"\n--- ⏳ INICIANDO CÁLCULO DIARIO DE PIVOTES ({today_utc}) ---")
     
     for i, symbol in enumerate(symbols):
-        # ... (Lógica de cálculo de pivotes igual que antes) ...
         try:
             klines_daily = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_1DAY, "2 day ago", limit=2)
             if len(klines_daily) < 2: continue
@@ -148,13 +159,12 @@ def actualizar_pivotes_diarios():
     with open(PIVOTS_FILE, 'w') as f:
         json.dump(all_pivots, f, indent=4)
         
-    print(f"--- ✅ {len(all_pivots)} Pivotes guardados en {PIVOTS_FILE} ---")
+    print(f"--- ✅ {len(all_pivotes)} Pivotes guardados en {PIVOTS_FILE} ---")
     enviar_telegram(f"⭐️ **PIVOTES ACTUALIZADOS** ⭐️\nSe calcularon los nuevos Pivotes para {len(all_pivots)} pares para el día {today_utc}.")
     return True
 
 def verificar_y_actualizar_pivotes():
     """Verifica si los Pivotes ya fueron calculados para el día de hoy."""
-    # (Lógica igual que antes)
     today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     try:
@@ -239,27 +249,29 @@ def check_active_trades(all_pivots):
                 
             # 3. Comprobar TP2 (Cierra operación con Ganancia Máxima)
             if (is_long and price > tp2_level) or (not is_long and price < tp2_level):
-                if not trade.get('tp2_hit'):
-                    mensaje = f"🎯 *TP2 LOGRADO* - {symbol} ({trade['entry_type']}) 🎯\n"
-                    mensaje += f"Precio: {price:.4f} | Nivel R2/S2: {tp2_level:.4f}"
-                    enviar_telegram(mensaje)
-                    
-                    # Mover a historial de cerrados
-                    trade['status'] = 'CLOSED_TP'
-                    trade['tp2_hit'] = True
-                    trade['close_price'] = price
-                    trade['close_date'] = datetime.now().isoformat()
-                    closed_trades_list.append(trade)
-                    del updated_trades[symbol]
+                if trade.get('tp1_hit') != 'True': # Asegura que haya pasado por TP1
+                    updated_trades[symbol]['tp1_hit'] = 'True'
+
+                mensaje = f"🎯 *TP2 LOGRADO* - {symbol} ({trade['entry_type']}) 🎯\n"
+                mensaje += f"Precio: {price:.4f} | Nivel R2/S2: {tp2_level:.4f}"
+                enviar_telegram(mensaje)
+                
+                # Mover a historial de cerrados
+                trade['status'] = 'CLOSED_TP'
+                trade['tp2_hit'] = 'True'
+                trade['close_price'] = price
+                trade['close_date'] = datetime.now().isoformat()
+                closed_trades_list.append(trade)
+                del updated_trades[symbol]
                 continue
 
             # 4. Comprobar TP1 (Marca Hit para monitorear TP2)
             if (is_long and price > tp1_level) or (not is_long and price < tp1_level):
-                if not trade.get('tp1_hit'):
+                if trade.get('tp1_hit') != 'True':
                     mensaje = f"✅ *TP1 LOGRADO* - {symbol} ({trade['entry_type']}) ✅\n"
                     mensaje += f"Precio: {price:.4f} | Nivel R1/S1: {tp1_level:.4f}"
                     enviar_telegram(mensaje)
-                    updated_trades[symbol]['tp1_hit'] = True
+                    updated_trades[symbol]['tp1_hit'] = 'True'
                     
         except Exception as e:
             print(f"❌ Error al chequear trade activo para {symbol}: {e}")
@@ -273,20 +285,19 @@ def check_active_trades(all_pivots):
 # ==============================================================================
 
 def detect_new_signals(all_pivots):
-    """Busca nuevos cruces EMA solo si no hay un trade activo, analizando volumen y EMAs lentas."""
+    """Busca nuevos cruces EMA solo si no hay un trade activo."""
 
     active_trades = load_active_trades()
     
     for symbol, pivot_data in all_pivots.items():
         try:
-            if symbol in active_trades and active_trades[symbol].get('status') == 'OPEN':
-                continue
+            # CORRECCIÓN DE DUPLICIDAD: Si el símbolo ya está activo, saltar.
+            if symbol in active_trades: 
+                continue 
                 
-            # Desempaquetar Pivotes
             pivotes = pivot_data['levels']
             R1, R2, S1, PP = pivotes['R1'], pivotes['R2'], pivotes['S1'], pivotes['PP']
 
-            # Obtener datos de 15m (necesitamos 200+100+50 velas para todas las EMAs y volumen)
             klines_15m = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_15MINUTE, "55 hour ago", limit=250)
             if len(klines_15m) < 201: continue
 
@@ -294,13 +305,11 @@ def detect_new_signals(all_pivots):
             df['Close'] = df['Close'].astype(float)
             df['Volume'] = df['Volume'].astype(float)
 
-            # Calcular EMAs
             df['EMA24'] = df['Close'].ewm(span=24, adjust=False).mean()
             df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
             df['EMA100'] = df['Close'].ewm(span=100, adjust=False).mean()
             df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
 
-            # Datos de la última vela CERRADA
             ema24_ant = df['EMA24'].iloc[-2]
             ema50_ant = df['EMA50'].iloc[-2]
             price_last_closed = df['Close'].iloc[-1]
@@ -310,9 +319,7 @@ def detect_new_signals(all_pivots):
             cruce_alcista = (ema24_ant < ema50_ant) and (df['EMA24'].iloc[-1] > df['EMA50'].iloc[-1])
             cruce_bajista = (ema24_ant > ema50_ant) and (df['EMA24'].iloc[-1] < df['EMA50'].iloc[-1])
             
-            
             # --- ANÁLISIS DE VOLUMEN ---
-            # Compara el volumen de la vela de cruce (última cerrada) con la hora anterior (4 velas)
             vol_cruce = df['Volume'].iloc[-1]
             vol_hora_ant = df['Volume'].iloc[-5:-1].mean()
             vol_change_pct = ((vol_cruce - vol_hora_ant) / vol_hora_ant) * 100 if vol_hora_ant > 0 else 0
@@ -327,14 +334,12 @@ def detect_new_signals(all_pivots):
             # --- LONG (COMPRA): S1 < Precio < R1 ---
             if cruce_alcista and (price_last_closed > S1 and price_last_closed < R1):
                 
-                # --- ABRIR NUEVO TRADE LONG ---
                 active_trades[symbol] = {
                     'status': 'OPEN',
                     'entry_type': 'LONG',
                     'entry_price': price_last_closed,
                     'tp1_key': 'R1', 'tp2_key': 'R2', 'sl_key': 'S1',
-                    'tp1_hit': False, 'tp2_hit': False,
-                    # Datos de análisis para documentación
+                    'tp1_hit': 'False', 'tp2_hit': 'False', # Guardados como strings
                     'vol_pct_change': round(vol_change_pct, 2),
                     'ema_100_context': ema_context['sobre_ema100'],
                     'ema_200_context': ema_context['sobre_ema200'],
@@ -354,14 +359,12 @@ def detect_new_signals(all_pivots):
             # --- SHORT (VENTA): P < Precio < R2 ---
             elif cruce_bajista and (price_last_closed > PP and price_last_closed < R2):
                 
-                # --- ABRIR NUEVO TRADE SHORT ---
                 active_trades[symbol] = {
                     'status': 'OPEN',
                     'entry_type': 'SHORT',
                     'entry_price': price_last_closed,
                     'tp1_key': 'PP', 'tp2_key': 'S1', 'sl_key': 'R2',
-                    'tp1_hit': False, 'tp2_hit': False,
-                    # Datos de análisis para documentación
+                    'tp1_hit': 'False', 'tp2_hit': 'False', # Guardados como strings
                     'vol_pct_change': round(vol_change_pct, 2),
                     'ema_100_context': ema_context['sobre_ema100'],
                     'ema_200_context': ema_context['sobre_ema200'],
@@ -374,7 +377,6 @@ def detect_new_signals(all_pivots):
                 mensaje += f"Cruce EMA24/50 BAJISTA.\n"
                 mensaje += f"Precio Entrada: {price_last_closed:.4f} | PP: {PP:.4f}\n"
                 mensaje += f"Volumen vs. Hora Anterior: **{vol_change_pct:.2f}%**\n"
-                # Para Venta, el contexto de EMA debe ser el opuesto (bajo)
                 mensaje += f"Contexto EMA: 100({'✅' if not ema_context['sobre_ema100'] else '❌'}) 200({'✅' if not ema_context['sobre_ema200'] else '❌'})"
                 enviar_telegram(mensaje)
                 print(f"✅ NUEVA VENTA detectada: {symbol}")
