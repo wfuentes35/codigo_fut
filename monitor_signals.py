@@ -27,7 +27,9 @@ client = Client(API_KEY, SECRET_KEY)
 SYMBOLS_FILE = 'top_100_symbols.json'
 PIVOTS_FILE = 'daily_pivots.json'
 TRADES_FILE = 'active_trades.json'
-CLOSED_TRADES_FILE = 'closed_trades.json' # Archivo para histórico
+CLOSED_TRADES_FILE = 'closed_trades.json'
+### NUEVO: Nombre del archivo para el historial en formato CSV (Excel)
+HISTORICO_CSV_FILE = 'historico_trades.csv'
 
 INTERVALO_MONITOREO_SEG = 900 # 15 minutos
 
@@ -36,23 +38,18 @@ INTERVALO_MONITOREO_SEG = 900 # 15 minutos
 # ==============================================================================
 
 def calcular_pivotes_fibonacci(high, low, close):
-    """Calcula los niveles de Pivote Fibonacci."""
     rango = high - low
     PP = (high + low + close) / 3 
-    
     FIB_382, FIB_618, FIB_100 = 0.382, 0.618, 1.000
-    
     R1 = PP + (rango * FIB_382)
     R2 = PP + (rango * FIB_618)
     R3 = PP + (rango * FIB_100) 
     S1 = PP - (rango * FIB_382)
     S2 = PP - (rango * FIB_618)
     S3 = PP - (rango * FIB_100)
-    
     return {k: round(v, 4) for k, v in {'PP': PP, 'R1': R1, 'R2': R2, 'R3': R3, 'S1': S1, 'S2': S2, 'S3': S3}.items()}
 
 def enviar_telegram(mensaje):
-    """Envía un mensaje a través de la API de Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': mensaje, 'parse_mode': 'Markdown'}
@@ -62,79 +59,67 @@ def enviar_telegram(mensaje):
 # Funciones de persistencia de estado de operaciones
 
 def load_active_trades():
-    """Carga el estado de las operaciones activas."""
     try:
-        with open(TRADES_FILE, 'r') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        with open(TRADES_FILE, 'r') as f: return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError): return {}
 
 def save_active_trades(trades):
-    """
-    Guarda el estado de las operaciones activas. 
-    Usa un conversor para manejar tipos de datos de NumPy, previniendo errores de serialización.
-    """
     def enhanced_json_converter(obj):
-        """Convierte tipos de NumPy a tipos nativos de Python para que sean serializables."""
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.bool_):
-            return bool(obj)
-        if isinstance(obj, datetime):
-            return obj.isoformat()
+        if isinstance(obj, np.integer): return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.bool_): return bool(obj)
+        if isinstance(obj, datetime): return obj.isoformat()
         raise TypeError(f'Object of type {obj.__class__.__name__} is not JSON serializable')
-
     try:
-        with open(TRADES_FILE, 'w') as f:
-            json.dump(trades, f, indent=4, default=enhanced_json_converter)
-    except Exception as e:
-        print(f"❌ Error al guardar {TRADES_FILE}: {e}")
+        with open(TRADES_FILE, 'w') as f: json.dump(trades, f, indent=4, default=enhanced_json_converter)
+    except Exception as e: print(f"❌ Error al guardar {TRADES_FILE}: {e}")
 
 def load_closed_trades():
-    """Carga el historial de operaciones cerradas."""
     try:
-        with open(CLOSED_TRADES_FILE, 'r') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+        with open(CLOSED_TRADES_FILE, 'r') as f: return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError): return []
 
+### CAMBIO: Ahora también guarda en un archivo .csv
 def save_closed_trades(trades_list):
-    """Guarda el historial de operaciones cerradas."""
+    """Guarda el historial en JSON y también en un archivo CSV para análisis en Excel."""
+    # Guardar en JSON (base de datos principal)
     try:
-        with open(CLOSED_TRADES_FILE, 'w') as f:
-            json.dump(trades_list, f, indent=4, default=str) # Usamos default=str como fallback para fechas
-    except Exception as e:
-        print(f"❌ Error al guardar {CLOSED_TRADES_FILE}: {e}")
+        with open(CLOSED_TRADES_FILE, 'w') as f: json.dump(trades_list, f, indent=4, default=str)
+    except Exception as e: print(f"❌ Error al guardar {CLOSED_TRADES_FILE}: {e}")
+    
+    # Guardar en CSV para análisis fácil
+    if trades_list:
+        try:
+            df = pd.DataFrame(trades_list)
+            df.to_csv(HISTORICO_CSV_FILE, index=False)
+            print(f"✅ Historial actualizado en {HISTORICO_CSV_FILE}")
+        except Exception as e:
+            print(f"❌ Error al guardar historial en CSV: {e}")
 
 # ==============================================================================
 # 3. 💾 FUNCIÓN DE ACTUALIZACIÓN DIARIA DE PIVOTES Y RESUMEN
 # ==============================================================================
 
 def actualizar_pivotes_diarios():
-    """Calcula Pivotes, los guarda y envía resumen de operaciones del día anterior."""
+    """Calcula Pivotes y envía resumen diario sin borrar el historial."""
     try:
-        with open(SYMBOLS_FILE, 'r') as f:
-            symbols = json.load(f)
+        with open(SYMBOLS_FILE, 'r') as f: symbols = json.load(f)
     except FileNotFoundError:
-        print(f"❌ Error: Archivo {SYMBOLS_FILE} no encontrado. Ejecuta el escaneo inicial.")
-        return False
+        print(f"❌ Error: Archivo {SYMBOLS_FILE} no encontrado."); return False
 
-    closed_trades_list = load_closed_trades()
-    if closed_trades_list:
-        ganadoras = sum(1 for t in closed_trades_list if t['status'] == 'CLOSED_TP')
-        perdedoras = sum(1 for t in closed_trades_list if t['status'] == 'CLOSED_SL')
-        total = len(closed_trades_list)
-        
-        mensaje_resumen = f"📊 **RESUMEN DEL DÍA ANTERIOR** 📊\n"
-        mensaje_resumen += f"Ganadoras (TP): {ganadoras}\n"
-        mensaje_resumen += f"Perdedoras (SL): {perdedoras}\n"
-        mensaje_resumen += f"Total de Operaciones Cerradas: {total}"
+    all_closed_trades = load_closed_trades()
+    yesterday_utc_str = (datetime.now(timezone.utc) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    trades_de_ayer = [t for t in all_closed_trades if t.get('close_date', '').startswith(yesterday_utc_str)]
+
+    if trades_de_ayer:
+        ganadoras = sum(1 for t in trades_de_ayer if t['status'] == 'CLOSED_TP')
+        perdedoras = sum(1 for t in trades_de_ayer if t['status'] == 'CLOSED_SL')
+        mensaje_resumen = (f"📊 **RESUMEN DEL DÍA ANTERIOR ({yesterday_utc_str})** 📊\n"
+                           f"Ganadoras (TP): {ganadoras}\n"
+                           f"Perdedoras (SL): {perdedoras}\n"
+                           f"Total: {len(trades_de_ayer)}")
         enviar_telegram(mensaje_resumen)
         
-        save_closed_trades([]) 
-
     all_pivots = {}
     today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     print(f"\n--- ⏳ INICIANDO CÁLCULO DIARIO DE PIVOTES ({today_utc}) ---")
@@ -143,45 +128,30 @@ def actualizar_pivotes_diarios():
         try:
             klines_daily = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_1DAY, "2 day ago", limit=2)
             if len(klines_daily) < 2: continue
-
             high_d, low_d, close_d = [float(klines_daily[-2][i]) for i in [2, 3, 4]]
             pivotes = calcular_pivotes_fibonacci(high_d, low_d, close_d)
-            
-            all_pivots[symbol] = {
-                'date': today_utc,
-                'levels': pivotes
-            }
+            all_pivots[symbol] = {'date': today_utc, 'levels': pivotes}
             if i % 20 == 0: print(f"   Calculando... {symbol}")
-                
-        except Exception as e:
-            print(f"   ❌ Error al calcular Pivotes para {symbol}: {e}")
+        except Exception as e: print(f"   ❌ Error al calcular Pivotes para {symbol}: {e}")
             
-    with open(PIVOTS_FILE, 'w') as f:
-        json.dump(all_pivots, f, indent=4)
-        
+    with open(PIVOTS_FILE, 'w') as f: json.dump(all_pivots, f, indent=4)
     print(f"--- ✅ {len(all_pivots)} Pivotes guardados en {PIVOTS_FILE} ---")
-    enviar_telegram(f"⭐️ **PIVOTES ACTUALIZADOS** ⭐️\nSe calcularon los nuevos Pivotes para {len(all_pivots)} pares para el día {today_utc}.")
+    enviar_telegram(f"⭐️ **PIVOTES ACTUALIZADOS** para el día {today_utc}.")
     return True
 
 def verificar_y_actualizar_pivotes():
-    """Verifica si los Pivotes ya fueron calculados para el día de hoy."""
     today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
-        with open(PIVOTS_FILE, 'r') as f:
-            daily_data = json.load(f)
-        if daily_data and any(data.get('date') == today_utc for data in daily_data.values()):
-            return True 
-        else:
-            return actualizar_pivotes_diarios()
-    except (FileNotFoundError, json.JSONDecodeError):
-        return actualizar_pivotes_diarios()
+        with open(PIVOTS_FILE, 'r') as f: daily_data = json.load(f)
+        if daily_data and any(data.get('date') == today_utc for data in daily_data.values()): return True 
+        else: return actualizar_pivotes_diarios()
+    except (FileNotFoundError, json.JSONDecodeError): return actualizar_pivotes_diarios()
 
 # ==============================================================================
 # 4. 📈 LÓGICA DE SEGUIMIENTO DE OPERACIONES (TP/SL)
 # ==============================================================================
 
 def check_active_trades(all_pivots):
-    """Verifica el progreso de las operaciones activas (TP1, TP2, SL)."""
     active_trades = load_active_trades()
     if not active_trades: return
         
@@ -190,71 +160,54 @@ def check_active_trades(all_pivots):
 
     for symbol, trade in active_trades.items():
         if trade.get('status') != 'OPEN': continue
-
         try:
             klines_15m = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_15MINUTE, "15m ago", limit=1)
             if not klines_15m: continue
             price = float(klines_15m[-1][4]) 
-            
             pivotes = all_pivots.get(symbol, {}).get('levels', {})
             if not pivotes: continue
 
             tp1_level, tp2_level, sl_level = pivotes[trade['tp1_key']], pivotes[trade['tp2_key']], pivotes[trade['sl_key']]
             is_long = trade['entry_type'] == 'LONG'
             
+            # Comprobar SL
             if (is_long and price < sl_level) or (not is_long and price > sl_level):
-                mensaje = f"🛑 *OPERACIÓN FALLIDA {trade['entry_type']} EN {symbol}* 🛑\n"
-                mensaje += f"Precio: {price:.4f} | Tocó SL ({trade['sl_key']}): {sl_level:.4f}"
+                mensaje = f"🛑 *SL ALCANZADO {trade['entry_type']} EN {symbol}* 🛑\nPrecio: {price:.4f} | Nivel SL: {sl_level:.4f}"
                 enviar_telegram(mensaje)
-                
-                trade.update({
-                    'status': 'CLOSED_SL',
-                    'close_price': price,
-                    'close_date': datetime.now().isoformat()
-                })
+                trade.update({'status': 'CLOSED_SL', 'close_price': price, 'close_date': datetime.now().isoformat(), 'symbol': symbol})
                 closed_trades_list.append(trade)
                 del updated_trades[symbol]
                 continue
-                
+            
+            # Comprobar TP2
             if (is_long and price > tp2_level) or (not is_long and price < tp2_level):
-                if not trade.get('tp1_hit'):
-                    updated_trades[symbol]['tp1_hit'] = True
-
-                mensaje = f"🎯 *TP2 LOGRADO* - {symbol} ({trade['entry_type']}) 🎯\n"
-                mensaje += f"Precio: {price:.4f} | Nivel R2/S2: {tp2_level:.4f}"
+                if not trade.get('tp1_hit'): updated_trades[symbol]['tp1_hit'] = True
+                mensaje = f"🎯 *TP2 LOGRADO {trade['entry_type']} EN {symbol}* 🎯\nPrecio: {price:.4f} | Nivel TP2: {tp2_level:.4f}"
                 enviar_telegram(mensaje)
-                
-                trade.update({
-                    'status': 'CLOSED_TP',
-                    'tp2_hit': True,
-                    'close_price': price,
-                    'close_date': datetime.now().isoformat()
-                })
+                trade.update({'status': 'CLOSED_TP', 'tp2_hit': True, 'close_price': price, 'close_date': datetime.now().isoformat(), 'symbol': symbol})
                 closed_trades_list.append(trade)
                 del updated_trades[symbol]
                 continue
 
+            # Comprobar TP1
             if (is_long and price > tp1_level) or (not is_long and price < tp1_level):
                 if not trade.get('tp1_hit'):
-                    mensaje = f"✅ *TP1 LOGRADO* - {symbol} ({trade['entry_type']}) ✅\n"
-                    mensaje += f"Precio: {price:.4f} | Nivel R1/S1: {tp1_level:.4f}"
+                    mensaje = f"✅ *TP1 LOGRADO {trade['entry_type']} EN {symbol}* ✅\nPrecio: {price:.4f} | Nivel TP1: {tp1_level:.4f}"
                     enviar_telegram(mensaje)
                     updated_trades[symbol]['tp1_hit'] = True
-                    
-        except Exception as e:
-            print(f"❌ Error al chequear trade activo para {symbol}: {e}")
+        except Exception as e: print(f"❌ Error al chequear trade activo para {symbol}: {e}")
 
     save_active_trades(updated_trades)
-    save_closed_trades(closed_trades_list)
+    if any(t['status'].startswith("CLOSED") for t in closed_trades_list):
+        save_closed_trades(closed_trades_list)
+
 
 # ==============================================================================
-# 5. 🚦 DETECCIÓN DE NUEVAS SEÑALES CON ANÁLISIS DE VOLUMEN/EMAs
+# 5. 🚦 DETECCIÓN DE NUEVAS SEÑALES
 # ==============================================================================
 
 def detect_new_signals(all_pivots):
-    """Busca nuevos cruces EMA solo si no hay un trade activo."""
     active_trades = load_active_trades()
-    
     for symbol, pivot_data in all_pivots.items():
         try:
             if symbol in active_trades: continue 
@@ -264,7 +217,7 @@ def detect_new_signals(all_pivots):
             klines_15m = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_15MINUTE, "55 hour ago", limit=250)
             if len(klines_15m) < 201: continue
 
-            df = pd.DataFrame(klines_15m, columns=['open_time', 'Open', 'High', 'Low', 'Close', 'Volume', 'close_time', 'Quote asset volume', 'Number of trades', 'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'])
+            df = pd.DataFrame(klines_15m, columns=['open_time', 'Open', 'High', 'Low', 'Close', 'Volume', 'close_time', 'qav', 'trades', 'tbav', 'tqav', 'ignore'])
             df[['Close', 'Volume']] = df[['Close', 'Volume']].astype(float)
 
             # --- CÁLCULO DE INDICADORES ---
@@ -273,61 +226,37 @@ def detect_new_signals(all_pivots):
             df['EMA100'] = df['Close'].ewm(span=100, adjust=False).mean()
             df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
 
-            # RSI (14)
             delta = df['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df['RSI'] = 100 - (100 / (1 + rs))
+            df['RSI'] = 100 - (100 / (1 + (gain / loss)))
 
-            # MACD (12, 26, 9)
             df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
             df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
-            df['MACD_line'] = df['EMA12'] - df['EMA26']
-            df['MACD_signal'] = df['MACD_line'].ewm(span=9, adjust=False).mean()
-            df['MACD_hist'] = df['MACD_line'] - df['MACD_signal']
+            df['MACD_hist'] = (df['EMA12'] - df['EMA26']) - (df['EMA12'] - df['EMA26']).ewm(span=9, adjust=False).mean()
 
-            # Bandas de Bollinger (20, 2)
             df['BB_middle'] = df['Close'].rolling(window=20).mean()
             std_dev = df['Close'].rolling(window=20).std()
             df['BB_upper'] = df['BB_middle'] + (std_dev * 2)
             df['BB_lower'] = df['BB_middle'] - (std_dev * 2)
-            
-            # --- ANÁLISIS DE VOLUMEN (AMBOS MÉTODOS) ---
             df['Volume_MA20'] = df['Volume'].rolling(window=20).mean()
 
-            # --- DATOS DE LA ÚLTIMA VELA CERRADA ---
-            last = df.iloc[-1]
-            prev = df.iloc[-2]
-            
+            last, prev = df.iloc[-1], df.iloc[-2]
             price_last_closed = last['Close']
             
             cruce_alcista = (prev['EMA24'] < prev['EMA50']) and (last['EMA24'] > last['EMA50'])
             cruce_bajista = (prev['EMA24'] > prev['EMA50']) and (last['EMA24'] < last['EMA50'])
             
-            # Método 1: Porcentaje vs. hora anterior
             vol_hora_ant = df['Volume'].iloc[-5:-1].mean()
             vol_pct_change = ((last['Volume'] - vol_hora_ant) / vol_hora_ant) * 100 if vol_hora_ant > 0 else 0
-
-            # Método 2: Ratio vs. media móvil de 20 períodos
             vol_ratio = last['Volume'] / last['Volume_MA20'] if last['Volume_MA20'] > 0 else 0
             
-            ema_context = {
-                'sobre_ema100': price_last_closed > last['EMA100'],
-                'sobre_ema200': price_last_closed > last['EMA200']
-            }
-            
-            # --- LÓGICA DE ENTRADA (SIN CAMBIOS) ---
             new_trade_data = {
-                'status': 'OPEN',
-                'entry_price': price_last_closed,
-                'tp1_hit': False, 'tp2_hit': False,
-                'entry_date': datetime.now().isoformat(),
-                # Datos originales guardados
+                'status': 'OPEN', 'entry_price': price_last_closed,
+                'tp1_hit': False, 'tp2_hit': False, 'entry_date': datetime.now().isoformat(),
                 'vol_pct_change_entry': round(vol_pct_change, 2),
-                'ema_100_context': ema_context['sobre_ema100'],
-                'ema_200_context': ema_context['sobre_ema200'],
-                # Nuevos datos para análisis
+                'ema_100_context': price_last_closed > last['EMA100'],
+                'ema_200_context': price_last_closed > last['EMA200'],
                 'vol_ratio_entry': round(vol_ratio, 2),
                 'rsi_entry': round(last['RSI'], 2) if pd.notna(last['RSI']) else None,
                 'macd_hist_entry': round(last['MACD_hist'], 6) if pd.notna(last['MACD_hist']) else None,
@@ -336,42 +265,29 @@ def detect_new_signals(all_pivots):
             }
 
             if cruce_alcista and (S1 < price_last_closed < R1):
-                new_trade_data.update({
-                    'entry_type': 'LONG',
-                    'tp1_key': 'R1', 'tp2_key': 'R2', 'sl_key': 'S1'
-                })
+                new_trade_data.update({'entry_type': 'LONG', 'tp1_key': 'R1', 'tp2_key': 'R2', 'sl_key': 'S1'})
                 active_trades[symbol] = new_trade_data
                 save_active_trades(active_trades)
-
-                mensaje = f"🚀 *NUEVA COMPRA EN {symbol} (15M)*\n"
-                mensaje += f"Precio Entrada: {price_last_closed:.4f} | PP: {PP:.4f}\n"
-                mensaje += f"Contexto EMA: 100({'✅' if ema_context['sobre_ema100'] else '❌'}) 200({'✅' if ema_context['sobre_ema200'] else '❌'})"
+                mensaje = (f"🚀 *NUEVA COMPRA {symbol}*\nPrecio: {price_last_closed:.4f}\n"
+                           f"Contexto EMA 100/200: {'✅' if new_trade_data['ema_100_context'] else '❌'}/{'✅' if new_trade_data['ema_200_context'] else '❌'}")
                 enviar_telegram(mensaje)
                 print(f"✅ NUEVA COMPRA detectada: {symbol}")
                 
             elif cruce_bajista and (PP < price_last_closed < R2):
-                new_trade_data.update({
-                    'entry_type': 'SHORT',
-                    'tp1_key': 'PP', 'tp2_key': 'S1', 'sl_key': 'R2'
-                })
+                new_trade_data.update({'entry_type': 'SHORT', 'tp1_key': 'PP', 'tp2_key': 'S1', 'sl_key': 'R2'})
                 active_trades[symbol] = new_trade_data
                 save_active_trades(active_trades)
-
-                mensaje = f"🔻 *NUEVA VENTA EN {symbol} (15M)*\n"
-                mensaje += f"Precio Entrada: {price_last_closed:.4f} | PP: {PP:.4f}\n"
-                mensaje += f"Contexto EMA: 100({'✅' if not ema_context['sobre_ema100'] else '❌'}) 200({'✅' if not ema_context['sobre_ema200'] else '❌'})"
+                mensaje = (f"🔻 *NUEVA VENTA {symbol}*\nPrecio: {price_last_closed:.4f}\n"
+                           f"Contexto EMA 100/200: {'❌' if new_trade_data['ema_100_context'] else '✅'}/{'❌' if new_trade_data['ema_200_context'] else '✅'}")
                 enviar_telegram(mensaje)
                 print(f"✅ NUEVA VENTA detectada: {symbol}")
-
-        except Exception as e:
-            print(f"❌ Error al procesar {symbol} en detección de señales: {e}")
+        except Exception as e: print(f"❌ Error al procesar {symbol} en detección de señales: {e}")
 
 # ==============================================================================
 # 6. 🔄 BUCLE PRINCIPAL
 # ==============================================================================
 
 def iniciar_monitoreo():
-    """Bucle principal que ejecuta el escaneo cada 15 minutos."""
     print("--- 🤖 Iniciando monitoreo de señales (15m) ---")
     while True:
         tiempo_inicio = time.time()
@@ -391,12 +307,11 @@ def iniciar_monitoreo():
         tiempo_espera = INTERVALO_MONITOREO_SEG - duracion
         
         print(f"Ciclo completado en {duracion:.2f} segundos.")
-        
         if tiempo_espera > 0:
             print(f"💤 Esperando {int(tiempo_espera)} segundos hasta el próximo ciclo...")
             time.sleep(tiempo_espera)
         else:
-            print("⚠️ Advertencia: El ciclo de escaneo tardó más de 15 minutos.")
+            print("⚠️ Advertencia: El ciclo tardó más de 15 minutos.")
             
 if __name__ == '__main__':
     iniciar_monitoreo()
