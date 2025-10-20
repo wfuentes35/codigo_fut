@@ -28,7 +28,6 @@ SYMBOLS_FILE = 'top_100_symbols.json'
 PIVOTS_FILE = 'daily_pivots.json'
 TRADES_FILE = 'active_trades.json'
 CLOSED_TRADES_FILE = 'closed_trades.json'
-### NUEVO: Nombre del archivo para el historial en formato CSV (Excel)
 HISTORICO_CSV_FILE = 'historico_trades.csv'
 
 INTERVALO_MONITOREO_SEG = 900 # 15 minutos
@@ -79,18 +78,27 @@ def load_closed_trades():
         with open(CLOSED_TRADES_FILE, 'r') as f: return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError): return []
 
-### CAMBIO: Ahora también guarda en un archivo .csv
 def save_closed_trades(trades_list):
     """Guarda el historial en JSON y también en un archivo CSV para análisis en Excel."""
-    # Guardar en JSON (base de datos principal)
     try:
         with open(CLOSED_TRADES_FILE, 'w') as f: json.dump(trades_list, f, indent=4, default=str)
     except Exception as e: print(f"❌ Error al guardar {CLOSED_TRADES_FILE}: {e}")
     
-    # Guardar en CSV para análisis fácil
     if trades_list:
         try:
             df = pd.DataFrame(trades_list)
+            # Reordenar columnas para mejor legibilidad en el CSV
+            column_order = [
+                'status', 'entry_type', 'symbol', 'entry_date', 'close_date', 
+                'entry_price', 'close_price', 'tp1_hit', 'tp2_hit',
+                'rsi_entry', 'macd_hist_entry', 'adx_entry', 'plus_di_entry', 'minus_di_entry',
+                'vol_ratio_entry', 'vol_pct_change_entry', 'ema_100_context', 'ema_200_context',
+                'bb_upper_entry', 'bb_lower_entry', 
+                'tp1_key', 'tp2_key', 'sl_key'
+            ]
+            # Filtrar para solo incluir columnas que existen en el df
+            df_columns = [col for col in column_order if col in df.columns]
+            df = df[df_columns]
             df.to_csv(HISTORICO_CSV_FILE, index=False)
             print(f"✅ Historial actualizado en {HISTORICO_CSV_FILE}")
         except Exception as e:
@@ -166,6 +174,9 @@ def check_active_trades(all_pivots):
             price = float(klines_15m[-1][4]) 
             pivotes = all_pivots.get(symbol, {}).get('levels', {})
             if not pivotes: continue
+            if trade['tp1_key'] not in pivotes or trade['tp2_key'] not in pivotes or trade['sl_key'] not in pivotes:
+                print(f"⚠️ Advertencia: Faltan claves de pivote para {symbol}. Saltando trade.")
+                continue
 
             tp1_level, tp2_level, sl_level = pivotes[trade['tp1_key']], pivotes[trade['tp2_key']], pivotes[trade['sl_key']]
             is_long = trade['entry_type'] == 'LONG'
@@ -198,13 +209,48 @@ def check_active_trades(all_pivots):
         except Exception as e: print(f"❌ Error al chequear trade activo para {symbol}: {e}")
 
     save_active_trades(updated_trades)
-    if any(t['status'].startswith("CLOSED") for t in closed_trades_list):
+    # Guardar en JSON y CSV solo si hubo cambios en trades cerrados
+    if any(trade['symbol'] == symbol for trade in closed_trades_list if trade.get('status', '').startswith('CLOSED')):
         save_closed_trades(closed_trades_list)
 
 
 # ==============================================================================
-# 5. 🚦 DETECCIÓN DE NUEVAS SEÑALES
+# 5. 🚦 DETECCIÓN DE NUEVAS SEÑALES (CON ADX AÑADIDO)
 # ==============================================================================
+
+def calculate_adx(df, period=14):
+    """Calcula el ADX, +DI y -DI."""
+    df['Prev_Close'] = df['Close'].shift(1)
+    df['Prev_High'] = df['High'].shift(1)
+    df['Prev_Low'] = df['Low'].shift(1)
+
+    df['High-Low'] = df['High'] - df['Low']
+    df['High-PrevClose'] = abs(df['High'] - df['Prev_Close'])
+    df['Low-PrevClose'] = abs(df['Low'] - df['Prev_Close'])
+    
+    df['TR'] = df[['High-Low', 'High-PrevClose', 'Low-PrevClose']].max(axis=1)
+    
+    move_up = df['High'] - df['Prev_High']
+    move_down = df['Prev_Low'] - df['Low']
+    
+    df['+DM'] = np.where((move_up > move_down) & (move_up > 0), move_up, 0)
+    df['-DM'] = np.where((move_down > move_up) & (move_down > 0), move_down, 0)
+    
+    # Suavizado con EWM (similar a Wilder's)
+    TR_smooth = df['TR'].ewm(span=period, adjust=False).mean()
+    DM_plus_smooth = df['+DM'].ewm(span=period, adjust=False).mean()
+    DM_minus_smooth = df['-DM'].ewm(span=period, adjust=False).mean()
+    
+    df['DI_plus'] = np.where(TR_smooth > 0, (DM_plus_smooth / TR_smooth) * 100, 0)
+    df['DI_minus'] = np.where(TR_smooth > 0, (DM_minus_smooth / TR_smooth) * 100, 0)
+    
+    DI_diff = abs(df['DI_plus'] - df['DI_minus'])
+    DI_sum = df['DI_plus'] + df['DI_minus']
+    
+    df['DX'] = np.where(DI_sum > 0, (DI_diff / DI_sum) * 100, 0)
+    df['ADX'] = df['DX'].ewm(span=period, adjust=False).mean()
+    
+    return df
 
 def detect_new_signals(all_pivots):
     active_trades = load_active_trades()
@@ -212,13 +258,14 @@ def detect_new_signals(all_pivots):
         try:
             if symbol in active_trades: continue 
             pivotes = pivot_data['levels']
-            R1, R2, S1, PP = pivotes['R1'], pivotes['R2'], pivotes['S1'], pivotes['PP']
+            R1, R2, R3, S1, PP = pivotes['R1'], pivotes['R2'], pivotes['R3'], pivotes['S1'], pivotes['PP']
 
             klines_15m = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_15MINUTE, "55 hour ago", limit=250)
             if len(klines_15m) < 201: continue
 
             df = pd.DataFrame(klines_15m, columns=['open_time', 'Open', 'High', 'Low', 'Close', 'Volume', 'close_time', 'qav', 'trades', 'tbav', 'tqav', 'ignore'])
-            df[['Close', 'Volume']] = df[['Close', 'Volume']].astype(float)
+            # Convertir columnas clave a float
+            df[['Close', 'Volume', 'High', 'Low']] = df[['Close', 'Volume', 'High', 'Low']].astype(float)
 
             # --- CÁLCULO DE INDICADORES ---
             df['EMA24'] = df['Close'].ewm(span=24, adjust=False).mean()
@@ -241,46 +288,89 @@ def detect_new_signals(all_pivots):
             df['BB_lower'] = df['BB_middle'] - (std_dev * 2)
             df['Volume_MA20'] = df['Volume'].rolling(window=20).mean()
 
+            ### NUEVO: Cálculo de ADX ###
+            df = calculate_adx(df, period=14)
+
+            # --- DATOS DE LA ÚLTIMA VELA ---
             last, prev = df.iloc[-1], df.iloc[-2]
             price_last_closed = last['Close']
             
             cruce_alcista = (prev['EMA24'] < prev['EMA50']) and (last['EMA24'] > last['EMA50'])
             cruce_bajista = (prev['EMA24'] > prev['EMA50']) and (last['EMA24'] < last['EMA50'])
             
-            vol_hora_ant = df['Volume'].iloc[-5:-1].mean()
-            vol_pct_change = ((last['Volume'] - vol_hora_ant) / vol_hora_ant) * 100 if vol_hora_ant > 0 else 0
-            vol_ratio = last['Volume'] / last['Volume_MA20'] if last['Volume_MA20'] > 0 else 0
-            
-            new_trade_data = {
-                'status': 'OPEN', 'entry_price': price_last_closed,
-                'tp1_hit': False, 'tp2_hit': False, 'entry_date': datetime.now().isoformat(),
-                'vol_pct_change_entry': round(vol_pct_change, 2),
-                'ema_100_context': price_last_closed > last['EMA100'],
-                'ema_200_context': price_last_closed > last['EMA200'],
-                'vol_ratio_entry': round(vol_ratio, 2),
-                'rsi_entry': round(last['RSI'], 2) if pd.notna(last['RSI']) else None,
-                'macd_hist_entry': round(last['MACD_hist'], 6) if pd.notna(last['MACD_hist']) else None,
-                'bb_upper_entry': round(last['BB_upper'], 4) if pd.notna(last['BB_upper']) else None,
-                'bb_lower_entry': round(last['BB_lower'], 4) if pd.notna(last['BB_lower']) else None,
-            }
+            rsi_actual = last['RSI']
+            macd_hist_actual = last['MACD_hist']
 
-            if cruce_alcista and (S1 < price_last_closed < R1):
-                new_trade_data.update({'entry_type': 'LONG', 'tp1_key': 'R1', 'tp2_key': 'R2', 'sl_key': 'S1'})
-                active_trades[symbol] = new_trade_data
-                save_active_trades(active_trades)
-                mensaje = (f"🚀 *NUEVA COMPRA {symbol}*\nPrecio: {price_last_closed:.4f}\n"
-                           f"Contexto EMA 100/200: {'✅' if new_trade_data['ema_100_context'] else '❌'}/{'✅' if new_trade_data['ema_200_context'] else '❌'}")
-                enviar_telegram(mensaje)
-                print(f"✅ NUEVA COMPRA detectada: {symbol}")
+            # --- LÓGICA DE ENTRADA CON FILTROS ---
+            
+            # CONDICIONES PARA COMPRA (LONG)
+            if (cruce_alcista and 
+                (S1 < price_last_closed < R1) and
+                macd_hist_actual > 0 and
+                rsi_actual < 75):
+
+                vol_hora_ant = df['Volume'].iloc[-5:-1].mean()
+                vol_pct_change = ((last['Volume'] - vol_hora_ant) / vol_hora_ant) * 100 if vol_hora_ant > 0 else 0
+                vol_ratio = last['Volume'] / last['Volume_MA20'] if last['Volume_MA20'] > 0 else 0
                 
-            elif cruce_bajista and (PP < price_last_closed < R2):
-                new_trade_data.update({'entry_type': 'SHORT', 'tp1_key': 'PP', 'tp2_key': 'S1', 'sl_key': 'R2'})
+                new_trade_data = {
+                    'status': 'OPEN', 'entry_price': price_last_closed,
+                    'tp1_hit': False, 'tp2_hit': False, 'entry_date': datetime.now().isoformat(),
+                    'vol_pct_change_entry': round(vol_pct_change, 2),
+                    'ema_100_context': price_last_closed > last['EMA100'],
+                    'ema_200_context': price_last_closed > last['EMA200'],
+                    'vol_ratio_entry': round(vol_ratio, 2),
+                    'rsi_entry': round(rsi_actual, 2) if pd.notna(rsi_actual) else None,
+                    'macd_hist_entry': round(macd_hist_actual, 6) if pd.notna(macd_hist_actual) else None,
+                    'bb_upper_entry': round(last['BB_upper'], 4) if pd.notna(last['BB_upper']) else None,
+                    'bb_lower_entry': round(last['BB_lower'], 4) if pd.notna(last['BB_lower']) else None,
+                    ### NUEVO: Guardar datos de ADX ###
+                    'adx_entry': round(last['ADX'], 2) if pd.notna(last['ADX']) else None,
+                    'plus_di_entry': round(last['DI_plus'], 2) if pd.notna(last['DI_plus']) else None,
+                    'minus_di_entry': round(last['DI_minus'], 2) if pd.notna(last['DI_minus']) else None,
+                    'entry_type': 'LONG', 'tp1_key': 'R1', 'tp2_key': 'R2', 'sl_key': 'S1'
+                }
                 active_trades[symbol] = new_trade_data
                 save_active_trades(active_trades)
-                mensaje = (f"🔻 *NUEVA VENTA {symbol}*\nPrecio: {price_last_closed:.4f}\n"
-                           f"Contexto EMA 100/200: {'❌' if new_trade_data['ema_100_context'] else '✅'}/{'❌' if new_trade_data['ema_200_context'] else '✅'}")
+                mensaje = (f"🚀 *NUEVA COMPRA (Filtrada) {symbol}*\n"
+                           f"Precio: {price_last_closed:.4f} | RSI: {rsi_actual:.2f}")
                 enviar_telegram(mensaje)
-                print(f"✅ NUEVA VENTA detectada: {symbol}")
+                print(f"✅ NUEVA COMPRA (Filtrada) detectada: {symbol}")
+                
+            # CONDICIONES PARA VENTA (SHORT) - LÓGICA MEJORADA
+            elif (cruce_bajista and
+                  (R1 < price_last_closed < R3) and
+                  macd_hist_actual < 0 and
+                  rsi_actual > 35):
+                
+                vol_hora_ant = df['Volume'].iloc[-5:-1].mean()
+                vol_pct_change = ((last['Volume'] - vol_hora_ant) / vol_hora_ant) * 100 if vol_hora_ant > 0 else 0
+                vol_ratio = last['Volume'] / last['Volume_MA20'] if last['Volume_MA20'] > 0 else 0
+                
+                new_trade_data = {
+                    'status': 'OPEN', 'entry_price': price_last_closed,
+                    'tp1_hit': False, 'tp2_hit': False, 'entry_date': datetime.now().isoformat(),
+                    'vol_pct_change_entry': round(vol_pct_change, 2),
+                    'ema_100_context': price_last_closed > last['EMA100'],
+                    'ema_200_context': price_last_closed > last['EMA200'],
+                    'vol_ratio_entry': round(vol_ratio, 2),
+                    'rsi_entry': round(rsi_actual, 2) if pd.notna(rsi_actual) else None,
+                    'macd_hist_entry': round(macd_hist_actual, 6) if pd.notna(macd_hist_actual) else None,
+                    'bb_upper_entry': round(last['BB_upper'], 4) if pd.notna(last['BB_upper']) else None,
+                    'bb_lower_entry': round(last['BB_lower'], 4) if pd.notna(last['BB_lower']) else None,
+                    ### NUEVO: Guardar datos de ADX ###
+                    'adx_entry': round(last['ADX'], 2) if pd.notna(last['ADX']) else None,
+                    'plus_di_entry': round(last['DI_plus'], 2) if pd.notna(last['DI_plus']) else None,
+                    'minus_di_entry': round(last['DI_minus'], 2) if pd.notna(last['DI_minus']) else None,
+                    'entry_type': 'SHORT', 'tp1_key': 'PP', 'tp2_key': 'S1', 'sl_key': 'R2'
+                }
+                active_trades[symbol] = new_trade_data
+                save_active_trades(active_trades)
+                mensaje = (f"🔻 *NUEVA VENTA (Filtrada) {symbol}*\n"
+                           f"Precio: {price_last_closed:.4f} | RSI: {rsi_actual:.2f}")
+                enviar_telegram(mensaje)
+                print(f"✅ NUEVA VENTA (Filtrada) detectada: {symbol}")
+
         except Exception as e: print(f"❌ Error al procesar {symbol} en detección de señales: {e}")
 
 # ==============================================================================
