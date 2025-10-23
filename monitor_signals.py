@@ -300,8 +300,7 @@ def detect_new_signals(all_pivots):
             df['BB_upper'] = df['BB_middle'] + (std_dev * 2); df['BB_lower'] = df['BB_middle'] - (std_dev * 2)
             df['Volume_MA20'] = df['Volume'].rolling(window=20).mean()
             df = calculate_adx(df, period=14)
-            df['Efficiency_Ratio'] = df['Close'].rolling(window=EFFICIENCY_RATIO_PERIOD + 1).apply(lambda x: calculate_efficiency_ratio(x, EFFICIENCY_RATIO_PERIOD), raw=True)
-
+            df['Efficiency_Ratio'] = df['Close'].rolling(window=EFFICIENCY_RATIO_PERIOD + 1).apply(lambda x: calculate_efficiency_ratio(x, EFFICIENCY_RATIO_PERIOD))
 
             # --- DATOS DE LA ÚLTIMA VELA ---
             last, prev = df.iloc[-1], df.iloc[-2]
@@ -420,3 +419,4 @@ def iniciar_monitoreo():
 
 if __name__ == '__main__':
     iniciar_monitoreo()
+
