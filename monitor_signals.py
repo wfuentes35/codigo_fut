@@ -134,7 +134,7 @@ def actualizar_pivotes_diarios():
             klines_daily = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_1DAY, "2 day ago", limit=2)
             if len(klines_daily) < 2: continue
             high_d, low_d, close_d = [float(klines_daily[-2][i]) for i in [2, 3, 4]]
-            pivotes = calculate_pivotes_fibonacci(high_d, low_d, close_d)
+            pivotes = calculate_pivots_fibonacci(high_d, low_d, close_d)
             all_pivots[symbol] = {'date': today_utc, 'levels': pivotes}
             symbols_processed += 1
             if symbols_processed % 50 == 0: print(f"   ...{symbols_processed}/{len(symbols)}") # Progreso cada 50
@@ -419,4 +419,5 @@ def iniciar_monitoreo():
 
 if __name__ == '__main__':
     iniciar_monitoreo()
+
 
