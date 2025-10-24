@@ -11,6 +11,7 @@ import os
 import traceback # Para depuración
 import logging # ### CAMBIO: Importar logging
 
+load_dotenv()
 # ==============================================================================
 # 0. 🪵 CONFIGURACIÓN DEL LOGGING
 # ==============================================================================
@@ -542,3 +543,4 @@ if __name__ == '__main__':
     except Exception as e:
         logger.critical(f"ERROR FATAL en el bucle principal: {e}\n{traceback.format_exc()}") # ### CAMBIO: Usar logger.critical con traceback
         enviar_telegram(f"💥 BOT DETENIDO: Error fatal - {e}")
+
