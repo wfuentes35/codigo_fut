@@ -422,7 +422,7 @@ def detect_new_signals(all_pivots):
 
             # CONDICIONES PARA COMPRA (LONG) - CON FILTROS
             if (cruce_alcista and (S1 < price_last_closed < R1) and macd_hist_actual > 0 and
-                rsi_actual < 75 and adx_actual > 25 and price_last_closed < bb_upper_actual):
+                (rsi_actual > 50 and rsi_actual < 70) and adx_actual > 25 and price_last_closed < bb_upper_actual):
                 entry_signal = True; entry_type = 'LONG'
 
             ### CAMBIO: CONDICIONES PARA VENTA (SHORT) - SOLO CRUCE Y ZONA, SIN FILTROS ###
@@ -543,4 +543,5 @@ if __name__ == '__main__':
     except Exception as e:
         logger.critical(f"ERROR FATAL en el bucle principal: {e}\n{traceback.format_exc()}") # ### CAMBIO: Usar logger.critical con traceback
         enviar_telegram(f"💥 BOT DETENIDO: Error fatal - {e}")
+
 
