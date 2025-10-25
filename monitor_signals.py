@@ -136,15 +136,12 @@ def save_closed_trades(trades_list):
     if trades_list:
         try:
             df = pd.DataFrame(trades_list)
-            column_order = [
-                'status', 'entry_type', 'symbol', 'entry_date', 'close_date', 'entry_price', 'close_price',
-                'tp1_hit', 'tp2_hit', 'rsi_entry', 'macd_hist_entry', 'adx_entry', 'plus_di_entry', 'minus_di_entry',
-                'ema_8_below_24_entry', 'short_entry_zone', 'efficiency_ratio_entry', 'h1_trend_aligned_entry',
-                'vol_ratio_entry', 'vol_pct_change_entry', 'ema_100_context', 'ema_200_context',
-                'bb_upper_entry', 'bb_lower_entry', 'tp1_key', 'tp2_key', 'sl_key'
-            ]
-            existing_cols = [col for col in column_order if col in df.columns]
-            df_ordered = df[existing_cols]
+
+            ### AJUSTE 4: GUARDADO COMPLETO DEL CSV ###
+            # Guarda todas las columnas del DataFrame, en lugar de una lista fija.
+            # Esto asegura que si añades nuevos indicadores, se guarden en el CSV.
+            df_ordered = df
+
             temp_file_csv = HISTORICO_CSV_FILE + ".tmp"
             df_ordered.to_csv(temp_file_csv, index=False, mode='w')
             os.replace(temp_file_csv, HISTORICO_CSV_FILE)
@@ -190,7 +187,7 @@ def actualizar_pivotes_diarios():
             klines_daily = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_1DAY, "2 day ago UTC", limit=2)
             if len(klines_daily) < 2: continue
             high_d, low_d, close_d = [float(klines_daily[-2][i]) for i in [2, 3, 4]]
-            pivotes = calculate_pivots_fibonacci(high_d, low_d, close_d) # <-- CORREGIDO con 'ts'
+            pivotes = calculate_pivots_fibonacci(high_d, low_d, close_d)
             all_pivots[symbol] = {'date': today_utc, 'levels': pivotes}
             symbols_processed += 1
             if symbols_processed % 50 == 0: logger.info(f"   ...Calculando Pivotes {symbols_processed}/{len(symbols)}") # ### CAMBIO: Usar logger.info
@@ -258,7 +255,16 @@ def check_active_trades(all_pivots):
             tp1_level, tp2_level, sl_level = pivotes[trade['tp1_key']], pivotes[trade['tp2_key']], pivotes[trade['sl_key']]
             is_long = trade['entry_type'] == 'LONG'
 
+            ### AJUSTE 1: MOVER SL A BREAK-EVEN EN TP1 ###
+            # Esto es clave para limpiar los datos: evita que una ganancia (TP1)
+            # se convierta en una pérdida total (SL original).
+            if trade.get('tp1_hit', False):
+                # Si TP1 ya fue golpeado, el nuevo Stop Loss es el precio de entrada
+                sl_level = trade['entry_price']
+            #############################################
+
             # SL Check
+            # (Esta lógica ahora usa el 'sl_level' original o el de break-even)
             if (is_long and price < sl_level) or (not is_long and price > sl_level):
                 mensaje = f"🛑 *SL {trade['entry_type']} {symbol}* | P: {price:.4f} SL: {sl_level:.4f}"
                 enviar_telegram(mensaje)
@@ -392,7 +398,12 @@ def detect_new_signals(all_pivots):
             delta = df['Close'].diff(); gain = (delta.where(delta > 0, 0)).rolling(window=14).mean(); loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             rs = gain / loss
             df['RSI'] = 100 - (100 / (1 + rs.replace([np.inf, -np.inf], np.nan)))
-            df['RSI'].fillna(method='ffill', inplace=True)
+            
+            ### AJUSTE 3: CORRECCIÓN ADVERTENCIA PANDAS ###
+            # Reemplaza .fillna(method='ffill', inplace=True) por la versión moderna
+            # que evita advertencias y asegura que la operación se realice.
+            df['RSI'] = df['RSI'].ffill()
+            
             df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean(); df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
             macd_line = df['EMA12'] - df['EMA26']; macd_signal = macd_line.ewm(span=9, adjust=False).mean()
             df['MACD_hist'] = macd_line - macd_signal
@@ -420,9 +431,12 @@ def detect_new_signals(all_pivots):
             entry_signal = False
             entry_type = None
 
-            # CONDICIONES PARA COMPRA (LONG) - CON FILTROS
+            ### AJUSTE 2: FILTRO RSI PARA LONGS ###
+            # Cambiado de 'rsi_actual < 75' al rango '(> 50 y < 70)'
+            # para capturar el momentum y evitar el agotamiento.
             if (cruce_alcista and (S1 < price_last_closed < R1) and macd_hist_actual > 0 and
-                (rsi_actual > 50 and rsi_actual < 70) and adx_actual > 25 and price_last_closed < bb_upper_actual):
+                (rsi_actual > 50 and rsi_actual < 70) and 
+                adx_actual > 25 and price_last_closed < bb_upper_actual):
                 entry_signal = True; entry_type = 'LONG'
 
             ### CAMBIO: CONDICIONES PARA VENTA (SHORT) - SOLO CRUCE Y ZONA, SIN FILTROS ###
@@ -543,5 +557,3 @@ if __name__ == '__main__':
     except Exception as e:
         logger.critical(f"ERROR FATAL en el bucle principal: {e}\n{traceback.format_exc()}") # ### CAMBIO: Usar logger.critical con traceback
         enviar_telegram(f"💥 BOT DETENIDO: Error fatal - {e}")
-
-
