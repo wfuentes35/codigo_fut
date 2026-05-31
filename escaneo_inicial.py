@@ -20,7 +20,7 @@ if not API_KEY or not SECRET_KEY:
 
 client = Client(API_KEY, SECRET_KEY)
 
-def obtener_top_symbols(limit=200):
+def obtener_top_symbols(limit=400):
     """Obtiene los 'limit' mejores pares de USDT de Binance Futures."""
     try:
         # Usamos la función de futuros ya que tu monitoreo es en Futures.
@@ -49,4 +49,4 @@ def obtener_top_symbols(limit=200):
 
 # Ejecutar el escaneo inicial
 if __name__ == '__main__':
-    obtener_top_symbols(limit=200)
+    obtener_top_symbols(limit=400)

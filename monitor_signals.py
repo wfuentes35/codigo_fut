@@ -137,9 +137,8 @@ def save_closed_trades(trades_list):
         try:
             df = pd.DataFrame(trades_list)
 
-            ### AJUSTE 4: GUARDADO COMPLETO DEL CSV ###
+            ### AJUSTE 4: GUARDADO COMPLETO DEL CSV (CORREGIDO) ###
             # Guarda todas las columnas del DataFrame, en lugar de una lista fija.
-            # Esto asegura que si añades nuevos indicadores, se guarden en el CSV.
             df_ordered = df
 
             temp_file_csv = HISTORICO_CSV_FILE + ".tmp"
@@ -255,16 +254,12 @@ def check_active_trades(all_pivots):
             tp1_level, tp2_level, sl_level = pivotes[trade['tp1_key']], pivotes[trade['tp2_key']], pivotes[trade['sl_key']]
             is_long = trade['entry_type'] == 'LONG'
 
-            ### AJUSTE 1: MOVER SL A BREAK-EVEN EN TP1 ###
-            # Esto es clave para limpiar los datos: evita que una ganancia (TP1)
-            # se convierta en una pérdida total (SL original).
+            ### AJUSTE 1 (DATO-CRÍTICO): MOVER SL A BREAK-EVEN EN TP1 ###
             if trade.get('tp1_hit', False):
-                # Si TP1 ya fue golpeado, el nuevo Stop Loss es el precio de entrada
                 sl_level = trade['entry_price']
             #############################################
 
             # SL Check
-            # (Esta lógica ahora usa el 'sl_level' original o el de break-even)
             if (is_long and price < sl_level) or (not is_long and price > sl_level):
                 mensaje = f"🛑 *SL {trade['entry_type']} {symbol}* | P: {price:.4f} SL: {sl_level:.4f}"
                 enviar_telegram(mensaje)
@@ -301,7 +296,7 @@ def check_active_trades(all_pivots):
 
 
 # ==============================================================================
-# 5. 🚦 DETECCIÓN DE NUEVAS SEÑALES (SHORTS SIN FILTROS, SOLO OBSERVACIÓN)
+# 5. 🚦 DETECCIÓN DE NUEVAS SEÑALES (CON LÓGICA MEJORADA)
 # ==============================================================================
 
 def calculate_adx(df, period=14):
@@ -366,6 +361,51 @@ def get_h1_trend_alignment(symbol, entry_type):
         logger.warning(f"Error obteniendo alineación H1 para {symbol}: {e}") # ### CAMBIO: Usar logger.warning
         return None
 
+### ===========================================================================
+### ### NUEVA FUNCIÓN (Punto 4 + 1): Filtro de Horario y Top-Down (RSI Diario)
+### ===========================================================================
+def get_market_condition(symbol):
+    """
+    Evalúa condiciones generales del mercado para el par:
+    1. Filtro de Horario: No operar después de las 17:00 UTC.
+    2. Filtro Top-Down: No comprar (LONG) si el RSI Diario > 75.
+    Retorna (favorable_para_long, favorable_para_short)
+    """
+    try:
+        # --- 1. FILTRO DE HORARIO ---
+        hora_actual_utc = datetime.now(timezone.utc).hour
+        if hora_actual_utc >= 17: # 17:00 UTC
+            logger.info(f"Filtro de horario: Pausando nuevas señales para {symbol} (después de las 17:00 UTC).")
+            return False, False # Desfavorable para ambos
+
+        # --- 2. FILTRO RSI DIARIO (Top-Down) ---
+        klines_daily = client.futures_historical_klines(symbol, Client.KLINE_INTERVAL_1DAY, "30 day ago UTC", limit=30)
+        if len(klines_daily) < 20: 
+            return True, True # Favorable si no hay datos suficientes
+
+        df_daily = pd.DataFrame(klines_daily, columns=['ot','O','H','L','C','V','ct','qav','nt','tbbav','tbqav','ig'])
+        df_daily[['Close']] = df_daily[['C']].astype(float)
+        
+        # RSI diario
+        delta = df_daily['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi_daily = 100 - (100 / (1 + rs))
+        
+        last_rsi_daily = rsi_daily.iloc[-1]
+        
+        # No operar LONG si RSI diario > 75 (sobrecompra extrema)
+        if last_rsi_daily > 75:
+            logger.info(f"Descartando LONG en {symbol} - RSI Diario muy alto ({last_rsi_daily:.1f})")
+            return False, True # Desfavorable para LONG, ok para SHORT
+            
+        return True, True # Favorable para ambos
+
+    except Exception as e:
+        logger.warning(f"Error evaluando condición de mercado para {symbol}: {e}")
+        return True, True # Ser permisivo si la API falla
+
 
 def detect_new_signals(all_pivots):
     active_trades = load_active_trades()
@@ -373,6 +413,16 @@ def detect_new_signals(all_pivots):
 
     for symbol in symbols_to_check:
         if symbol in active_trades: continue
+        
+        ### ====================================================== ###
+        ### ### NUEVO FILTRO DE HORARIO Y TOP-DOWN (Punto 1 y 4) ### ###
+        ### ====================================================== ###
+        favorable_para_long, favorable_para_short = get_market_condition(symbol)
+        if not favorable_para_long and not favorable_para_short:
+            # Filtro de horario (17:00+ UTC) activado
+            continue # Saltar al siguiente símbolo
+        ##############################################################
+
         pivot_data = all_pivots.get(symbol)
         if not pivot_data: continue
         pivotes = pivot_data.get('levels')
@@ -399,9 +449,7 @@ def detect_new_signals(all_pivots):
             rs = gain / loss
             df['RSI'] = 100 - (100 / (1 + rs.replace([np.inf, -np.inf], np.nan)))
             
-            ### AJUSTE 3: CORRECCIÓN ADVERTENCIA PANDAS ###
-            # Reemplaza .fillna(method='ffill', inplace=True) por la versión moderna
-            # que evita advertencias y asegura que la operación se realice.
+            ### AJUSTE 3 (DATO-CRÍTICO): CORRECCIÓN ADVERTENCIA PANDAS ###
             df['RSI'] = df['RSI'].ffill()
             
             df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean(); df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
@@ -416,12 +464,15 @@ def detect_new_signals(all_pivots):
             # --- DATOS DE LA ÚLTIMA VELA ---
             if len(df) < 2: continue
             last, prev = df.iloc[-1], df.iloc[-2]
-            required_indicators = ['ADX', 'RSI', 'MACD_hist', 'BB_upper', 'Efficiency_Ratio', 'EMA8', 'EMA24', 'EMA50']
+            required_indicators = ['ADX', 'RSI', 'MACD_hist', 'BB_upper', 'Efficiency_Ratio', 'EMA8', 'EMA24', 'EMA50', 'EMA100', 'EMA200', 'Volume_MA20']
             if last[required_indicators].isnull().any(): continue
 
             price_last_closed = last['Close']; bb_upper_actual = last['BB_upper']; adx_actual = last['ADX']
             rsi_actual = last['RSI']; macd_hist_actual = last['MACD_hist']; ema8_below_24 = last['EMA8'] < last['EMA24']
             efficiency_ratio_actual = last['Efficiency_Ratio']
+            
+            # Calcular vol_ratio (Punto 2)
+            vol_ratio = last['Volume'] / last['Volume_MA20'] if (last['Volume_MA20'] is not None and last['Volume_MA20'] > 0) else 0
 
             cruce_alcista = (prev['EMA24'] < prev['EMA50']) and (last['EMA24'] > last['EMA50'])
             cruce_bajista = (prev['EMA24'] > prev['EMA50']) and (last['EMA24'] < last['EMA50'])
@@ -431,19 +482,27 @@ def detect_new_signals(all_pivots):
             entry_signal = False
             entry_type = None
 
-            ### AJUSTE 2: FILTRO RSI PARA LONGS ###
-            # Cambiado de 'rsi_actual < 75' al rango '(> 50 y < 70)'
-            # para capturar el momentum y evitar el agotamiento.
-            if (cruce_alcista and (S1 < price_last_closed < R1) and macd_hist_actual > 0 and
-                (rsi_actual > 50 and rsi_actual < 70) and 
+            ### ======================================================= ###
+            ### ### AJUSTE: NUEVOS FILTROS LONG (Puntos 2, 3, 4)      ### ###
+            ### ======================================================= ###
+            if (favorable_para_long and cruce_alcista and 
+                (S1 < price_last_closed < R1) and macd_hist_actual > 0 and
+                (rsi_actual > 50 and rsi_actual < 67) and  # <-- Punto 3: Filtro RSI (67)
+                vol_ratio > 1.0 and                       # <-- Punto 2: Filtro Volumen
                 adx_actual > 25 and price_last_closed < bb_upper_actual):
+                
                 entry_signal = True; entry_type = 'LONG'
 
-            ### CAMBIO: CONDICIONES PARA VENTA (SHORT) - SOLO CRUCE Y ZONA, SIN FILTROS ###
-            elif (cruce_bajista and
-                  (R1 < price_last_closed < R3)): # <-- SOLO CRUCE Y ZONA R1-R3
+            ### ======================================================= ###
+            ### ### AJUSTE: NUEVO FILTRO SHORT (Sugerencia EMA 200)   ### ###
+            ### ======================================================= ###
+            elif (favorable_para_short and cruce_bajista and
+                  (R1 < price_last_closed < R3) and
+                  price_last_closed < last['EMA200']): # <-- ¡NUEVO FILTRO DE CONTEXTO EMA 200!
+                
                 entry_signal = True; entry_type = 'SHORT'
-                # Los demás indicadores (MACD, RSI, ADX, EMA8) se calcularán y guardarán, pero NO filtrarán
+                # (Mantenemos la lógica de recolección de datos simple para SHORTS)
+
 
             # Si se detectó una señal válida, obtener datos adicionales y guardar
             if entry_signal:
@@ -451,9 +510,8 @@ def detect_new_signals(all_pivots):
 
                 vol_hora_ant = df['Volume'].iloc[-5:-1].mean()
                 vol_pct_change = ((last['Volume'] - vol_hora_ant) / vol_hora_ant) * 100 if vol_hora_ant > 0 else 0
-                vol_ratio = last['Volume'] / last['Volume_MA20'] if (last['Volume_MA20'] is not None and last['Volume_MA20'] > 0) else 0
-
-                short_zone = None
+                
+                short_zone = None # short_zone se define aquí para que exista siempre
                 if entry_type == 'SHORT':
                     if price_last_closed > R2: short_zone = "Above R2"
                     elif price_last_closed > R1: short_zone = "Above R1"
@@ -482,9 +540,10 @@ def detect_new_signals(all_pivots):
 
                 if entry_type == 'LONG':
                     new_trade_data.update({'tp1_key': 'R1', 'tp2_key': 'R2', 'sl_key': 'S1'})
-                    mensaje = (f"🚀 *Compra {symbol}* | P:{price_last_closed:.4f} RSI:{rsi_actual:.1f} ADX:{adx_actual:.1f}")
+                    mensaje = (f"🚀 *Compra {symbol}* | P:{price_last_closed:.4f} RSI:{rsi_actual:.1f} ADX:{adx_actual:.1f} VolR:{vol_ratio:.1f}")
                     log_msg = f"Nueva COMPRA detectada: {symbol} @ {price_last_closed:.4f}"
-                else: # SHORT
+                
+                elif entry_type == 'SHORT':
                     new_trade_data.update({'tp1_key': 'PP', 'tp2_key': 'S1', 'sl_key': 'R2'})
                     mensaje = (f"🔻 *Venta {symbol}* | P:{price_last_closed:.4f} RSI:{rsi_actual:.1f} ADX:{adx_actual:.1f} Z:{short_zone}")
                     log_msg = f"Nueva VENTA detectada: {symbol} @ {price_last_closed:.4f} (Zona: {short_zone})"
